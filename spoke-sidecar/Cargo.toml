@@ -1,0 +1,12 @@
+[package]
+name = "spoke-sidecar"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "spoke-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"

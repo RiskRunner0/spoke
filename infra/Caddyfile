@@ -1,0 +1,21 @@
+{$DOMAIN} {
+    # Matrix client-server API
+    handle /_matrix/* {
+        reverse_proxy conduit:8448
+    }
+
+    # Matrix federation
+    handle /_matrix/federation/* {
+        reverse_proxy conduit:8448
+    }
+
+    # Spoke sidecar (LiveKit token endpoint)
+    handle /_spoke/* {
+        reverse_proxy spoke-sidecar:8090
+    }
+
+    # LiveKit WebSocket
+    handle /livekit/* {
+        reverse_proxy livekit:7880
+    }
+}

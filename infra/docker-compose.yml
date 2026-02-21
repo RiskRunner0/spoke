@@ -1,0 +1,40 @@
+services:
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+    depends_on:
+      - conduit
+      - livekit
+
+  conduit:
+    image: matrixconduit/matrix-conduit:latest
+    ports:
+      - "8448:8448"
+    environment:
+      CONDUIT_SERVER_NAME: ${DOMAIN}
+      CONDUIT_DATABASE_BACKEND: rocksdb
+      CONDUIT_ALLOW_REGISTRATION: "true"
+      CONDUIT_ALLOW_FEDERATION: "false"
+      CONDUIT_MAX_REQUEST_SIZE: "20000000"
+      CONDUIT_LOG: warn
+    volumes:
+      - conduit_data:/var/lib/matrix-conduit
+
+  livekit:
+    image: livekit/livekit-server:latest
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
+    command: --config /etc/livekit.yaml
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml
+
+volumes:
+  caddy_data:
+  conduit_data:

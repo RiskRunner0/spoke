@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "spoke-core",
+    "spoke-sidecar",
+]
+resolver = "2"

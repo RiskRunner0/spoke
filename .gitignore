@@ -1,0 +1,20 @@
+# Rust
+target/
+Cargo.lock
+
+# Flutter (spoke-app, when added)
+spoke-app/build/
+spoke-app/.dart_tool/
+spoke-app/.flutter-plugins
+spoke-app/.flutter-plugins-dependencies
+spoke-app/.packages
+
+# Infra secrets
+infra/.env
+infra/*.local.yaml
+
+# Editor
+.idea/
+.vscode/
+*.swp
+.DS_Store
