@@ -1,0 +1,24 @@
+# Local development only — plain HTTP, no TLS, registration open.
+# NOT for production use.
+#
+# Usage:
+#   docker compose -f infra/docker-compose.dev.yml up -d
+#   docker compose -f infra/docker-compose.dev.yml down -v   # wipe state
+
+services:
+  conduit:
+    image: matrixconduit/matrix-conduit:latest
+    ports:
+      - "8448:8448"
+    environment:
+      CONDUIT_SERVER_NAME: localhost
+      CONDUIT_DATABASE_BACKEND: rocksdb
+      CONDUIT_ALLOW_REGISTRATION: "true"
+      CONDUIT_ALLOW_FEDERATION: "false"
+      CONDUIT_MAX_REQUEST_SIZE: "20000000"
+      CONDUIT_LOG: info
+    volumes:
+      - conduit_dev_data:/var/lib/matrix-conduit
+
+volumes:
+  conduit_dev_data:

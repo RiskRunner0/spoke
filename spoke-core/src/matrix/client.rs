@@ -1,7 +1,10 @@
 use matrix_sdk::{
     Client,
     config::SyncSettings,
-    ruma::UserId,
+    ruma::{
+        UserId,
+        api::client::{account::register::v3 as register, uiaa::AuthData},
+    },
 };
 use std::path::Path;
 use tracing::info;
@@ -14,7 +17,7 @@ use crate::matrix::error::MatrixError;
 /// the sync loop. All higher-level operations (rooms, messages, voice events)
 /// go through this.
 pub struct SpokeClient {
-    pub(crate) inner: Client,
+    pub inner: Client,
 }
 
 impl SpokeClient {
@@ -50,6 +53,32 @@ impl SpokeClient {
 
         info!("logged in as {username}");
         Ok(())
+    }
+
+    /// Register a new account on the homeserver.
+    ///
+    /// Conduit with open registration accepts a simple dummy-auth flow.
+    /// Returns Ok(()) if the user already exists — callers can treat
+    /// registration and login as a single "ensure account exists" step.
+    pub async fn register(&self, username: &str, password: &str) -> Result<(), MatrixError> {
+        let mut req = register::Request::new();
+        req.username = Some(username.to_owned());
+        req.password = Some(password.to_owned());
+        req.auth = Some(AuthData::Dummy(Default::default()));
+
+        match self.inner.matrix_auth().register(req).await {
+            Ok(_) => {
+                info!("registered {username}");
+                Ok(())
+            }
+            Err(matrix_sdk::Error::Http(ref e))
+                if e.to_string().contains("M_USER_IN_USE") =>
+            {
+                info!("{username} already registered");
+                Ok(())
+            }
+            Err(e) => Err(MatrixError::Sdk(e)),
+        }
     }
 
     /// Run the Matrix sync loop. Drives all incoming events.
