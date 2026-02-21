@@ -1,0 +1,16 @@
+[package]
+name = "spoke-app"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "spoke"
+path = "src/main.rs"
+
+[dependencies]
+spoke-core = { path = "../spoke-core" }
+eframe = "0.31"
+egui = "0.31"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
