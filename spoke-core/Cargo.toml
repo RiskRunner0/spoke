@@ -11,6 +11,7 @@ matrix-sdk = { version = "0.8", features = ["sqlite"] }
 tokio = { version = "1", features = ["full"] }
 thiserror = "2"
 tracing = "0.1"
+serde_json = "1"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
