@@ -5,7 +5,6 @@ mod app;
 mod bridge;
 
 use app::SpokeApp;
-use bridge::spawn_matrix_task;
 
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt()
@@ -30,10 +29,7 @@ fn main() -> eframe::Result<()> {
         "Spoke",
         options,
         Box::new(|cc| {
-            // We have the egui Context here, so we can pass it to the bridge
-            // for repaint wakeups.
-            spawn_matrix_task(event_tx, cmd_rx, cc.egui_ctx.clone());
-            Ok(Box::new(SpokeApp::new(cc, event_rx, cmd_tx)))
+            Ok(Box::new(SpokeApp::new(cc, event_rx, cmd_tx, Some((event_tx, cmd_rx)))))
         }),
     )
 }

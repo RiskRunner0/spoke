@@ -55,11 +55,14 @@ pub fn spawn_matrix_task(
     event_tx: mpsc::Sender<AppEvent>,
     cmd_rx: tokio_mpsc::UnboundedReceiver<AppCommand>,
     ctx: egui::Context,
+    homeserver: String,
+    username: String,
+    password: String,
 ) {
     std::thread::spawn(move || {
         tokio::runtime::Runtime::new()
             .expect("tokio runtime")
-            .block_on(matrix_task(event_tx, cmd_rx, ctx));
+            .block_on(matrix_task(event_tx, cmd_rx, ctx, homeserver, username, password));
     });
 }
 
@@ -69,11 +72,10 @@ async fn matrix_task(
     event_tx: mpsc::Sender<AppEvent>,
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<AppCommand>,
     ctx: egui::Context,
+    homeserver: String,
+    username: String,
+    password: String,
 ) {
-    let homeserver = std::env::var("SPOKE_HS")
-        .unwrap_or_else(|_| "http://localhost:8448".into());
-    let username = std::env::var("SPOKE_USER").unwrap_or_else(|_| "alice".into());
-    let password = std::env::var("SPOKE_PASS").unwrap_or_else(|_| "alicepass".into());
     let db_path = PathBuf::from(format!("/tmp/spoke-app-{username}.db"));
 
     let client = match SpokeClient::new(&homeserver, &db_path).await {
