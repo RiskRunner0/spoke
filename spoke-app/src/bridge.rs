@@ -3,6 +3,7 @@ use std::{path::PathBuf, sync::mpsc};
 
 use matrix_sdk::{
     Client, Room, RoomState,
+    config::SyncSettings,
     ruma::{
         RoomId, UserId,
         events::room::{
@@ -117,7 +118,7 @@ async fn matrix_task(
         let tx = event_tx.clone();
         let ctx = ctx.clone();
         client.inner.add_event_handler(
-            move |event: StrippedRoomMemberEvent, room: Room, client: Client| {
+            move |event: StrippedRoomMemberEvent, _room: Room, client: Client| {
                 let tx = tx.clone(); let ctx = ctx.clone();
                 async move {
                     if event.content.membership != MembershipState::Invite { return; }
@@ -204,9 +205,20 @@ async fn matrix_task(
         }
     });
 
-    // Sync loop — blocks until client stops.
-    if let Err(e) = client.sync().await {
-        warn!("sync ended: {e}");
+    // Sync loop — manual so we can poll invite/room state after every cycle.
+    let mut settings = SyncSettings::default();
+    loop {
+        match client.inner.sync_once(settings.clone()).await {
+            Ok(response) => {
+                settings = settings.token(response.next_batch);
+                send(&event_tx, &ctx, AppEvent::RoomsUpdated(collect_rooms(&client)));
+                send(&event_tx, &ctx, AppEvent::InvitesUpdated(collect_invites(&client)));
+            }
+            Err(e) => {
+                warn!("sync error: {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        }
     }
 }
 
