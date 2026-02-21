@@ -1,0 +1,10 @@
+[global]
+server_name = "localhost"
+database_backend = "rocksdb"
+database_path = "/var/lib/matrix-conduit/"
+allow_registration = true
+allow_federation = false
+max_request_size = 20000000
+log = "info"
+address = "0.0.0.0"
+port = 8448

@@ -11,13 +11,9 @@ services:
     ports:
       - "8448:8448"
     environment:
-      CONDUIT_SERVER_NAME: localhost
-      CONDUIT_DATABASE_BACKEND: rocksdb
-      CONDUIT_ALLOW_REGISTRATION: "true"
-      CONDUIT_ALLOW_FEDERATION: "false"
-      CONDUIT_MAX_REQUEST_SIZE: "20000000"
-      CONDUIT_LOG: info
+      CONDUIT_CONFIG: /etc/conduit.toml
     volumes:
+      - ./conduit.dev.toml:/etc/conduit.toml:ro
       - conduit_dev_data:/var/lib/matrix-conduit
 
 volumes:
