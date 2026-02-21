@@ -1,4 +1,4 @@
-use std::sync::mpsc;
+use std::{collections::HashSet, sync::mpsc};
 
 use eframe::egui;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -13,7 +13,9 @@ pub struct SpokeApp {
     rooms: Vec<RoomInfo>,
     pending_invites: Vec<InviteInfo>,
     selected_room: Option<usize>,
-    messages: Vec<(String, String, String)>, // (room_id, sender, body)
+    /// Per-room message log: room_id → [(sender, body)] in chronological order.
+    messages: std::collections::HashMap<String, Vec<(String, String)>>,
+    fetched_rooms: HashSet<String>,
     input: String,
 
     // Invite dialog state.
@@ -86,7 +88,8 @@ impl SpokeApp {
             rooms: Vec::new(),
             pending_invites: Vec::new(),
             selected_room: None,
-            messages: Vec::new(),
+            messages: std::collections::HashMap::new(),
+            fetched_rooms: HashSet::new(),
             input: String::new(),
             show_invite_dialog: false,
             invite_input: String::new(),
@@ -135,7 +138,7 @@ impl eframe::App for SpokeApp {
                     self.pending_invites = invites;
                 }
                 AppEvent::Message { room_id, sender, body } => {
-                    self.messages.push((room_id, sender, body));
+                    self.messages.entry(room_id).or_default().push((sender, body));
                 }
                 AppEvent::Joined { room_id } => {
                     if let Some(i) = self.rooms.iter().position(|r| r.id == room_id) {
@@ -155,6 +158,13 @@ impl eframe::App for SpokeApp {
                     } else {
                         self.status = format!("Error: {e}");
                     }
+                }
+                AppEvent::HistoryLoaded { room_id, messages } => {
+                    let slot = self.messages.entry(room_id).or_default();
+                    // Prepend history before any live messages already received.
+                    let live = std::mem::take(slot);
+                    *slot = messages;
+                    slot.extend(live);
                 }
                 // Voice events
                 AppEvent::VoiceJoined { room_id } => {
@@ -177,6 +187,13 @@ impl eframe::App for SpokeApp {
         if !self.logged_in {
             self.show_login_panel(ctx);
             return;
+        }
+
+        // Trigger a history fetch the first time each room is selected.
+        if let Some(room) = self.selected_room.and_then(|i| self.rooms.get(i)) {
+            if self.fetched_rooms.insert(room.id.clone()) {
+                let _ = self.cmd_tx.send(AppCommand::FetchHistory { room_id: room.id.clone() });
+            }
         }
 
         // ── Invite dialog ─────────────────────────────────────────────────────
@@ -424,8 +441,8 @@ impl eframe::App for SpokeApp {
             egui::ScrollArea::vertical()
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
-                    for (msg_room_id, sender, body) in &self.messages {
-                        if room_id.as_deref() == Some(msg_room_id.as_str()) {
+                    if let Some(msgs) = room_id.as_ref().and_then(|id| self.messages.get(id)) {
+                        for (sender, body) in msgs {
                             ui.horizontal(|ui| {
                                 ui.strong(sender);
                                 ui.label(body);

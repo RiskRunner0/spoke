@@ -4,12 +4,16 @@ use std::{path::PathBuf, sync::mpsc};
 use matrix_sdk::{
     AuthSession, Client, Room, RoomState,
     config::SyncSettings,
+    room::MessagesOptions,
     ruma::{
-        OwnedRoomOrAliasId, RoomId, UserId,
+        OwnedRoomOrAliasId, RoomId, UserId, uint,
         api::client::room::create_room::v3::Request as CreateRoomRequest,
-        events::room::{
-            member::{MembershipState, StrippedRoomMemberEvent},
-            message::{MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent},
+        events::{
+            AnySyncMessageLikeEvent, AnySyncTimelineEvent,
+            room::{
+                member::{MembershipState, StrippedRoomMemberEvent},
+                message::{MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent},
+            },
         },
     },
 };
@@ -51,6 +55,8 @@ pub enum AppEvent {
     VoiceJoined { room_id: String },
     VoiceLeft,
     VoiceParticipantsUpdated(Vec<String>),
+    // History
+    HistoryLoaded { room_id: String, messages: Vec<(String, String)> },
 }
 
 #[derive(Debug)]
@@ -65,6 +71,8 @@ pub enum AppCommand {
     JoinVoice { room_id: String },
     LeaveVoice,
     MuteVoice { muted: bool },
+    // History
+    FetchHistory { room_id: String },
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -391,6 +399,46 @@ async fn matrix_task(
                                 }
                             }
                         }
+                    }
+                }
+
+                AppCommand::FetchHistory { room_id } => {
+                    let Ok(rid) = RoomId::parse(&room_id) else { continue };
+                    let Some(room) = inner.get_room(&rid) else { continue };
+
+                    // Fetch up to 50 events; the default (10) is too few.
+                    let mut options = MessagesOptions::backward();
+                    options.limit = uint!(50);
+
+                    match room.messages(options).await {
+                        Ok(response) => {
+                            let mut msgs: Vec<(String, String)> = Vec::new();
+                            for event in response.chunk {
+                                if let Ok(AnySyncTimelineEvent::MessageLike(
+                                    AnySyncMessageLikeEvent::RoomMessage(ev),
+                                )) = event.raw().deserialize()
+                                {
+                                    if let Some(original) = ev.as_original() {
+                                        if let MessageType::Text(text) =
+                                            &original.content.msgtype
+                                        {
+                                            msgs.push((
+                                                original.sender.to_string(),
+                                                text.body.clone(),
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                            // messages() returns newest-first; reverse to chronological.
+                            msgs.reverse();
+                            send(
+                                &tx,
+                                &ctx_cmd,
+                                AppEvent::HistoryLoaded { room_id, messages: msgs },
+                            );
+                        }
+                        Err(e) => warn!("fetch history {room_id}: {e}"),
                     }
                 }
             }
