@@ -1,22 +1,22 @@
 /// Async/sync bridge between the Matrix background task and the egui UI.
-///
-/// The Matrix sync loop runs on a dedicated tokio runtime in a background
-/// thread. It sends `AppEvent`s to the UI via a std::sync::mpsc channel and
-/// receives `AppCommand`s via a tokio unbounded channel. The egui Context is
-/// passed in so the background task can call `request_repaint()` whenever new
-/// data arrives — this wakes the UI without polling.
 use std::{path::PathBuf, sync::mpsc};
 
 use matrix_sdk::{
-    Room, RoomState,
-    ruma::events::room::message::{MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent},
+    Client, Room, RoomState,
+    ruma::{
+        RoomId, UserId,
+        events::room::{
+            member::{MembershipState, StrippedRoomMemberEvent},
+            message::{MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent},
+        },
+    },
 };
 use tokio::sync::mpsc as tokio_mpsc;
 use tracing::warn;
 
 use spoke_core::matrix::SpokeClient;
 
-// ── Event types ──────────────────────────────────────────────────────────────
+// ── Shared types ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct RoomInfo {
@@ -24,23 +24,32 @@ pub struct RoomInfo {
     pub name: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct InviteInfo {
+    pub room_id: String,
+    pub room_name: String,
+    pub inviter: String,
+}
+
 #[derive(Debug)]
 pub enum AppEvent {
     Connected { username: String },
     RoomsUpdated(Vec<RoomInfo>),
+    InvitesUpdated(Vec<InviteInfo>),
     Message { room_id: String, sender: String, body: String },
+    Joined { room_id: String },
     Error(String),
 }
 
 #[derive(Debug)]
 pub enum AppCommand {
     SendMessage { room_id: String, body: String },
+    InviteUser { room_id: String, mxid: String },
+    JoinRoom { room_id: String },
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-/// Spawn the Matrix task on a background thread with its own tokio runtime.
-/// Returns immediately; the task runs for the lifetime of the process.
 pub fn spawn_matrix_task(
     event_tx: mpsc::Sender<AppEvent>,
     cmd_rx: tokio_mpsc::UnboundedReceiver<AppCommand>,
@@ -60,83 +69,134 @@ async fn matrix_task(
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<AppCommand>,
     ctx: egui::Context,
 ) {
-    // Config from env — login UI comes later.
     let homeserver = std::env::var("SPOKE_HS")
         .unwrap_or_else(|_| "http://localhost:8448".into());
     let username = std::env::var("SPOKE_USER").unwrap_or_else(|_| "alice".into());
     let password = std::env::var("SPOKE_PASS").unwrap_or_else(|_| "alicepass".into());
     let db_path = PathBuf::from(format!("/tmp/spoke-app-{username}.db"));
 
-    // Build client.
     let client = match SpokeClient::new(&homeserver, &db_path).await {
         Ok(c) => c,
-        Err(e) => {
-            send(&event_tx, &ctx, AppEvent::Error(e.to_string()));
-            return;
-        }
+        Err(e) => { send(&event_tx, &ctx, AppEvent::Error(e.to_string())); return; }
     };
 
     if let Err(e) = client.register(&username, &password).await {
         warn!("register: {e}");
     }
-
     if let Err(e) = client.login(&username, &password).await {
-        send(&event_tx, &ctx, AppEvent::Error(e.to_string()));
-        return;
+        send(&event_tx, &ctx, AppEvent::Error(e.to_string())); return;
     }
 
     send(&event_tx, &ctx, AppEvent::Connected { username: username.clone() });
 
-    // Register message event handler.
+    // ── Event handlers ────────────────────────────────────────────────────────
+
+    // Incoming text messages.
     {
         let tx = event_tx.clone();
         let ctx = ctx.clone();
         client.inner.add_event_handler(
             move |event: OriginalSyncRoomMessageEvent, room: Room| {
-                let tx = tx.clone();
-                let ctx = ctx.clone();
+                let tx = tx.clone(); let ctx = ctx.clone();
                 async move {
-                    if room.state() != RoomState::Joined {
-                        return;
-                    }
+                    if room.state() != RoomState::Joined { return; }
                     if let MessageType::Text(text) = event.content.msgtype {
-                        send(
-                            &tx,
-                            &ctx,
-                            AppEvent::Message {
-                                room_id: room.room_id().to_string(),
-                                sender: event.sender.to_string(),
-                                body: text.body,
-                            },
-                        );
+                        send(&tx, &ctx, AppEvent::Message {
+                            room_id: room.room_id().to_string(),
+                            sender: event.sender.to_string(),
+                            body: text.body,
+                        });
                     }
                 }
             },
         );
     }
 
-    // Initial sync to hydrate room state.
+    // Incoming invites — StrippedRoomMemberEvent fires for invited rooms.
+    {
+        let tx = event_tx.clone();
+        let ctx = ctx.clone();
+        client.inner.add_event_handler(
+            move |event: StrippedRoomMemberEvent, room: Room, client: Client| {
+                let tx = tx.clone(); let ctx = ctx.clone();
+                async move {
+                    if event.content.membership != MembershipState::Invite { return; }
+                    let Some(user_id) = client.user_id() else { return };
+                    if event.state_key != user_id { return; }
+                    send(&tx, &ctx, AppEvent::InvitesUpdated(
+                        collect_invites_from_client(&client)
+                    ));
+                }
+            },
+        );
+    }
+
+    // ── Initial sync ──────────────────────────────────────────────────────────
+
     if let Err(e) = client.inner.sync_once(Default::default()).await {
-        send(&event_tx, &ctx, AppEvent::Error(e.to_string()));
-        return;
+        send(&event_tx, &ctx, AppEvent::Error(e.to_string())); return;
     }
 
     send(&event_tx, &ctx, AppEvent::RoomsUpdated(collect_rooms(&client)));
+    send(&event_tx, &ctx, AppEvent::InvitesUpdated(collect_invites(&client)));
 
-    // Command handler — runs concurrently with the sync loop.
+    // ── Command handler ───────────────────────────────────────────────────────
+
     let inner = client.inner.clone();
+    let tx = event_tx.clone();
+    let ctx_cmd = ctx.clone();
+
     tokio::spawn(async move {
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
                 AppCommand::SendMessage { room_id, body } => {
-                    let Ok(rid) = matrix_sdk::ruma::RoomId::parse(&room_id) else {
-                        continue;
+                    let Ok(rid) = RoomId::parse(&room_id) else { continue };
+                    if let Some(room) = inner.get_room(&rid) {
+                        if let Err(e) = room.send(RoomMessageEventContent::text_plain(body)).await {
+                            warn!("send: {e}");
+                        }
+                    }
+                }
+
+                AppCommand::InviteUser { room_id, mxid } => {
+                    let Ok(rid) = RoomId::parse(&room_id) else { continue };
+                    let Ok(uid) = UserId::parse(&mxid) else {
+                        warn!("invalid mxid: {mxid}"); continue;
                     };
                     if let Some(room) = inner.get_room(&rid) {
-                        if let Err(e) =
-                            room.send(RoomMessageEventContent::text_plain(body)).await
-                        {
-                            warn!("send error: {e}");
+                        if let Err(e) = room.invite_user_by_id(&uid).await {
+                            warn!("invite: {e}");
+                            send(&tx, &ctx_cmd, AppEvent::Error(e.to_string()));
+                        }
+                    }
+                }
+
+                AppCommand::JoinRoom { room_id } => {
+                    let Ok(rid) = RoomId::parse(&room_id) else { continue };
+                    match inner.join_room_by_id(&rid).await {
+                        Ok(_) => {
+                            send(&tx, &ctx_cmd, AppEvent::Joined { room_id });
+                            send(&tx, &ctx_cmd, AppEvent::RoomsUpdated(
+                                inner.joined_rooms().into_iter()
+                                    .map(|r| RoomInfo {
+                                        id: r.room_id().to_string(),
+                                        name: r.name().unwrap_or_else(|| r.room_id().to_string()),
+                                    })
+                                    .collect()
+                            ));
+                            send(&tx, &ctx_cmd, AppEvent::InvitesUpdated(
+                                inner.invited_rooms().into_iter()
+                                    .map(|r| InviteInfo {
+                                        room_id: r.room_id().to_string(),
+                                        room_name: r.name().unwrap_or_else(|| r.room_id().to_string()),
+                                        inviter: String::new(),
+                                    })
+                                    .collect()
+                            ));
+                        }
+                        Err(e) => {
+                            warn!("join: {e}");
+                            send(&tx, &ctx_cmd, AppEvent::Error(e.to_string()));
                         }
                     }
                 }
@@ -144,7 +204,7 @@ async fn matrix_task(
         }
     });
 
-    // Sync loop — blocks until the client stops.
+    // Sync loop — blocks until client stops.
     if let Err(e) = client.sync().await {
         warn!("sync ended: {e}");
     }
@@ -158,13 +218,24 @@ fn send(tx: &mpsc::Sender<AppEvent>, ctx: &egui::Context, event: AppEvent) {
 }
 
 fn collect_rooms(client: &SpokeClient) -> Vec<RoomInfo> {
-    client
-        .inner
-        .joined_rooms()
-        .into_iter()
+    client.inner.joined_rooms().into_iter()
         .map(|r| RoomInfo {
-            name: r.name().unwrap_or_else(|| r.room_id().to_string()),
             id: r.room_id().to_string(),
+            name: r.name().unwrap_or_else(|| r.room_id().to_string()),
+        })
+        .collect()
+}
+
+fn collect_invites(client: &SpokeClient) -> Vec<InviteInfo> {
+    collect_invites_from_client(&client.inner)
+}
+
+fn collect_invites_from_client(client: &Client) -> Vec<InviteInfo> {
+    client.invited_rooms().into_iter()
+        .map(|r| InviteInfo {
+            room_id: r.room_id().to_string(),
+            room_name: r.name().unwrap_or_else(|| r.room_id().to_string()),
+            inviter: String::new(),
         })
         .collect()
 }
