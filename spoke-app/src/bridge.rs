@@ -2,7 +2,7 @@
 use std::{path::PathBuf, sync::mpsc};
 
 use matrix_sdk::{
-    Client, Room, RoomState,
+    AuthSession, Client, Room, RoomState,
     config::SyncSettings,
     ruma::{
         OwnedRoomOrAliasId, RoomId, UserId,
@@ -16,7 +16,13 @@ use matrix_sdk::{
 use tokio::sync::mpsc as tokio_mpsc;
 use tracing::warn;
 
-use spoke_core::matrix::SpokeClient;
+use spoke_core::{
+    matrix::SpokeClient,
+    voice::{
+        VoiceEvent, VoiceSession,
+        events::{VoiceJoinEventContent, VoiceLeaveEventContent, VoiceMuteEventContent},
+    },
+};
 
 // ── Shared types ──────────────────────────────────────────────────────────────
 
@@ -41,6 +47,10 @@ pub enum AppEvent {
     Message { room_id: String, sender: String, body: String },
     Joined { room_id: String },
     Error(String),
+    // Voice events
+    VoiceJoined { room_id: String },
+    VoiceLeft,
+    VoiceParticipantsUpdated(Vec<String>),
 }
 
 #[derive(Debug)]
@@ -51,6 +61,10 @@ pub enum AppCommand {
     CreateRoom { name: String },
     JoinRoomByAlias { alias: String },
     LeaveRoom { room_id: String },
+    // Voice commands
+    JoinVoice { room_id: String },
+    LeaveVoice,
+    MuteVoice { muted: bool },
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -154,6 +168,12 @@ async fn matrix_task(
     let ctx_cmd = ctx.clone();
 
     tokio::spawn(async move {
+        let mut voice: Option<VoiceSession> = None;
+        let mut voice_room_id: Option<String> = None;
+        let sidecar_url = std::env::var("SPOKE_SIDECAR")
+            .unwrap_or_else(|_| "http://localhost:8090".into());
+        let http = reqwest::Client::new();
+
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
                 AppCommand::SendMessage { room_id, body } => {
@@ -235,6 +255,140 @@ async fn matrix_task(
                             Err(e) => {
                                 warn!("leave: {e}");
                                 send(&tx, &ctx_cmd, AppEvent::Error(e.to_string()));
+                            }
+                        }
+                    }
+                }
+
+                // ── Voice commands ─────────────────────────────────────────────
+
+                AppCommand::JoinVoice { room_id } => {
+                    // Tear down any existing session first.
+                    if let Some(old) = voice.take() {
+                        old.disconnect().await;
+                    }
+
+                    // Get the Matrix access token.
+                    let access_token = match inner.session() {
+                        Some(AuthSession::Matrix(s)) => s.tokens.access_token.clone(),
+                        _ => {
+                            warn!("JoinVoice: no matrix session");
+                            send(&tx, &ctx_cmd, AppEvent::Error("not logged in".into()));
+                            continue;
+                        }
+                    };
+
+                    // Send org.spoke.voice.join to the room.
+                    let session_id = uuid::Uuid::new_v4().to_string();
+                    if let Ok(rid) = RoomId::parse(&room_id) {
+                        if let Some(room) = inner.get_room(&rid) {
+                            let content = VoiceJoinEventContent { session_id };
+                            if let Err(e) = room.send(content).await {
+                                warn!("voice join event: {e}");
+                            }
+                        }
+                    }
+
+                    // Ask the sidecar for a LiveKit token.
+                    let resp = http
+                        .post(format!("{sidecar_url}/_spoke/v1/voice/token"))
+                        .bearer_auth(&access_token)
+                        .json(&serde_json::json!({"room_id": &room_id}))
+                        .send()
+                        .await;
+
+                    let resp = match resp {
+                        Ok(r) if r.status().is_success() => r,
+                        Ok(r) => {
+                            warn!("sidecar returned {}", r.status());
+                            send(&tx, &ctx_cmd, AppEvent::Error(
+                                format!("sidecar error: {}", r.status()),
+                            ));
+                            continue;
+                        }
+                        Err(e) => {
+                            warn!("sidecar request: {e}");
+                            send(&tx, &ctx_cmd, AppEvent::Error(format!("sidecar: {e}")));
+                            continue;
+                        }
+                    };
+
+                    let body: serde_json::Value =
+                        match resp.json().await {
+                            Ok(v) => v,
+                            Err(e) => {
+                                warn!("sidecar response parse: {e}");
+                                send(&tx, &ctx_cmd, AppEvent::Error(format!("sidecar parse: {e}")));
+                                continue;
+                            }
+                        };
+
+                    let lk_url = body["livekit_url"]
+                        .as_str()
+                        .unwrap_or("ws://localhost:7880")
+                        .to_owned();
+                    let lk_token = body["livekit_token"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_owned();
+
+                    // Connect to LiveKit.
+                    let (voice_event_tx, mut voice_event_rx) =
+                        tokio_mpsc::unbounded_channel::<VoiceEvent>();
+
+                    match VoiceSession::connect(&lk_url, &lk_token, voice_event_tx).await {
+                        Ok(session) => {
+                            voice = Some(session);
+                            voice_room_id = Some(room_id.clone());
+                            send(&tx, &ctx_cmd, AppEvent::VoiceJoined { room_id });
+
+                            // Forward VoiceEvents → AppEvents.
+                            let tx2 = tx.clone();
+                            let ctx2 = ctx_cmd.clone();
+                            tokio::spawn(async move {
+                                while let Some(ve) = voice_event_rx.recv().await {
+                                    match ve {
+                                        VoiceEvent::ParticipantsUpdated(ps) => {
+                                            send(&tx2, &ctx2, AppEvent::VoiceParticipantsUpdated(ps));
+                                        }
+                                        VoiceEvent::Error(e) => {
+                                            send(&tx2, &ctx2, AppEvent::Error(format!("voice: {e}")));
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            warn!("voice connect: {e}");
+                            send(&tx, &ctx_cmd, AppEvent::Error(format!("voice: {e}")));
+                        }
+                    }
+                }
+
+                AppCommand::LeaveVoice => {
+                    if let Some(session) = voice.take() {
+                        session.disconnect().await;
+                    }
+                    // Send org.spoke.voice.leave.
+                    if let Some(rid_str) = voice_room_id.take() {
+                        if let Ok(rid) = RoomId::parse(&rid_str) {
+                            if let Some(room) = inner.get_room(&rid) {
+                                let _ = room.send(VoiceLeaveEventContent {}).await;
+                            }
+                        }
+                    }
+                    send(&tx, &ctx_cmd, AppEvent::VoiceLeft);
+                }
+
+                AppCommand::MuteVoice { muted } => {
+                    if let Some(ref session) = voice {
+                        session.set_muted(muted);
+                        // Send org.spoke.voice.mute.
+                        if let Some(rid_str) = &voice_room_id {
+                            if let Ok(rid) = RoomId::parse(rid_str.as_str()) {
+                                if let Some(room) = inner.get_room(&rid) {
+                                    let _ = room.send(VoiceMuteEventContent { muted }).await;
+                                }
                             }
                         }
                     }

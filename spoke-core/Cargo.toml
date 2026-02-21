@@ -10,8 +10,13 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 matrix-sdk = { version = "0.8", features = ["sqlite"] }
 tokio = { version = "1", features = ["full"] }
 thiserror = "2"
-tracing = "0.1"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tracing = "0.1"
+livekit = { version = "0.7", features = ["tokio"] }
+cpal = "0.15"
+futures = "0.3"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

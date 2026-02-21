@@ -36,6 +36,12 @@ pub struct SpokeApp {
     login_error: Option<String>,
     login_connecting: bool,
     pending_spawn: Option<(mpsc::Sender<AppEvent>, tokio_mpsc::UnboundedReceiver<AppCommand>)>,
+
+    // Voice state.
+    in_voice: bool,
+    voice_muted: bool,
+    voice_room_id: Option<String>,
+    voice_participants: Vec<String>,
 }
 
 impl SpokeApp {
@@ -95,6 +101,10 @@ impl SpokeApp {
             login_error: None,
             login_connecting,
             pending_spawn,
+            in_voice: false,
+            voice_muted: false,
+            voice_room_id: None,
+            voice_participants: Vec::new(),
         }
     }
 }
@@ -145,6 +155,21 @@ impl eframe::App for SpokeApp {
                     } else {
                         self.status = format!("Error: {e}");
                     }
+                }
+                // Voice events
+                AppEvent::VoiceJoined { room_id } => {
+                    self.in_voice = true;
+                    self.voice_room_id = Some(room_id);
+                    self.voice_participants.clear();
+                }
+                AppEvent::VoiceLeft => {
+                    self.in_voice = false;
+                    self.voice_room_id = None;
+                    self.voice_participants.clear();
+                    self.voice_muted = false;
+                }
+                AppEvent::VoiceParticipantsUpdated(ps) => {
+                    self.voice_participants = ps;
                 }
             }
         }
@@ -306,6 +331,15 @@ impl eframe::App for SpokeApp {
                         });
                     }
                 }
+
+                // ── Voice participants (sidebar section) ─────────────────────
+                if self.in_voice && !self.voice_participants.is_empty() {
+                    ui.separator();
+                    ui.small("Voice");
+                    for p in &self.voice_participants {
+                        ui.label(p);
+                    }
+                }
             });
 
         // ── Bottom input bar ──────────────────────────────────────────────────
@@ -343,6 +377,7 @@ impl eframe::App for SpokeApp {
             let room_name = current.map(|r| r.name.as_str()).unwrap_or("—");
             let room_id = current.map(|r| r.id.clone());
 
+            // Voice controls in the header (right-to-left layout).
             ui.horizontal(|ui| {
                 ui.heading(room_name);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -354,6 +389,31 @@ impl eframe::App for SpokeApp {
                             if let Some(rid) = room_id.clone() {
                                 let _ = self.cmd_tx.send(AppCommand::LeaveRoom { room_id: rid });
                                 self.selected_room = None;
+                            }
+                        }
+
+                        // Voice buttons — shown when a room is selected.
+                        let currently_in_this_room = self.in_voice
+                            && self.voice_room_id.as_deref() == room_id.as_deref();
+
+                        if currently_in_this_room {
+                            if ui.button("Leave Voice").clicked() {
+                                let _ = self.cmd_tx.send(AppCommand::LeaveVoice);
+                            }
+                            let mute_label = if self.voice_muted { "Unmute" } else { "Mute" };
+                            if ui.button(mute_label).clicked() {
+                                self.voice_muted = !self.voice_muted;
+                                let _ = self.cmd_tx.send(AppCommand::MuteVoice {
+                                    muted: self.voice_muted,
+                                });
+                            }
+                            // Small "in voice" indicator
+                            ui.small(egui::RichText::new("● Voice").color(egui::Color32::GREEN));
+                        } else if !self.in_voice {
+                            if ui.button("Join Voice").clicked() {
+                                if let Some(rid) = room_id.clone() {
+                                    let _ = self.cmd_tx.send(AppCommand::JoinVoice { room_id: rid });
+                                }
                             }
                         }
                     }

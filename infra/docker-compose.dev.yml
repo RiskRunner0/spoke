@@ -16,5 +16,14 @@ services:
       - ./conduit.dev.toml:/etc/conduit.toml:ro
       - conduit_dev_data:/var/lib/matrix-conduit
 
+  livekit:
+    image: livekit/livekit-server:latest
+    command: --config /etc/livekit.yaml --dev
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+    volumes:
+      - ./livekit.dev.yaml:/etc/livekit.yaml:ro
+
 volumes:
   conduit_dev_data:
