@@ -20,6 +20,14 @@ pub struct SpokeApp {
     show_invite_dialog: bool,
     invite_input: String,
 
+    // Create room dialog state.
+    show_create_room_dialog: bool,
+    create_room_name: String,
+
+    // Join room dialog state.
+    show_join_dialog: bool,
+    join_room_input: String,
+
     // Login state.
     logged_in: bool,
     login_homeserver: String,
@@ -76,6 +84,10 @@ impl SpokeApp {
             input: String::new(),
             show_invite_dialog: false,
             invite_input: String::new(),
+            show_create_room_dialog: false,
+            create_room_name: String::new(),
+            show_join_dialog: false,
+            join_room_input: String::new(),
             logged_in: false,
             login_homeserver,
             login_username,
@@ -99,6 +111,11 @@ impl eframe::App for SpokeApp {
                     self.status = format!("@{username}");
                 }
                 AppEvent::RoomsUpdated(rooms) => {
+                    if let Some(i) = self.selected_room {
+                        if i >= rooms.len() {
+                            self.selected_room = if rooms.is_empty() { None } else { Some(rooms.len() - 1) };
+                        }
+                    }
                     self.rooms = rooms;
                     if self.selected_room.is_none() && !self.rooms.is_empty() {
                         self.selected_room = Some(0);
@@ -177,6 +194,77 @@ impl eframe::App for SpokeApp {
             }
         }
 
+        // ── Create Room dialog ────────────────────────────────────────────────
+        if self.show_create_room_dialog {
+            let mut open = true;
+            egui::Window::new("Create Room")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.label("Room name");
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.create_room_name)
+                            .desired_width(240.0),
+                    );
+                    resp.request_focus();
+                    ui.horizontal(|ui| {
+                        let can_create = !self.create_room_name.is_empty();
+                        let enter = resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if ui.add_enabled(can_create, egui::Button::new("Create")).clicked() || (can_create && enter) {
+                            let _ = self.cmd_tx.send(AppCommand::CreateRoom {
+                                name: std::mem::take(&mut self.create_room_name),
+                            });
+                            self.show_create_room_dialog = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_create_room_dialog = false;
+                            self.create_room_name.clear();
+                        }
+                    });
+                });
+            if !open {
+                self.show_create_room_dialog = false;
+                self.create_room_name.clear();
+            }
+        }
+
+        // ── Join Room dialog ──────────────────────────────────────────────────
+        if self.show_join_dialog {
+            let mut open = true;
+            egui::Window::new("Join Room")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.label("Room address");
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.join_room_input)
+                            .hint_text("#alias:server or !id:server")
+                            .desired_width(240.0),
+                    );
+                    resp.request_focus();
+                    ui.horizontal(|ui| {
+                        let can_join = !self.join_room_input.is_empty();
+                        let enter = resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if ui.add_enabled(can_join, egui::Button::new("Join")).clicked() || (can_join && enter) {
+                            let _ = self.cmd_tx.send(AppCommand::JoinRoomByAlias {
+                                alias: std::mem::take(&mut self.join_room_input),
+                            });
+                            self.show_join_dialog = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_join_dialog = false;
+                            self.join_room_input.clear();
+                        }
+                    });
+                });
+            if !open {
+                self.show_join_dialog = false;
+                self.join_room_input.clear();
+            }
+        }
+
         // ── Left sidebar ──────────────────────────────────────────────────────
         egui::SidePanel::left("rooms")
             .resizable(true)
@@ -186,6 +274,15 @@ impl eframe::App for SpokeApp {
                 ui.heading("Spoke");
                 ui.small(&self.status);
                 ui.separator();
+
+                ui.horizontal(|ui| {
+                    if ui.small_button("+ New").clicked() {
+                        self.show_create_room_dialog = true;
+                    }
+                    if ui.small_button("Join…").clicked() {
+                        self.show_join_dialog = true;
+                    }
+                });
 
                 for (i, room) in self.rooms.iter().enumerate() {
                     let selected = self.selected_room == Some(i);
@@ -249,8 +346,16 @@ impl eframe::App for SpokeApp {
             ui.horizontal(|ui| {
                 ui.heading(room_name);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.selected_room.is_some() && ui.button("Invite…").clicked() {
-                        self.show_invite_dialog = true;
+                    if self.selected_room.is_some() {
+                        if ui.button("Invite…").clicked() {
+                            self.show_invite_dialog = true;
+                        }
+                        if ui.button("Leave").clicked() {
+                            if let Some(rid) = room_id.clone() {
+                                let _ = self.cmd_tx.send(AppCommand::LeaveRoom { room_id: rid });
+                                self.selected_room = None;
+                            }
+                        }
                     }
                 });
             });

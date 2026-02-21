@@ -2,5 +2,6 @@
 members = [
     "spoke-core",
     "spoke-sidecar",
+    "spoke-app",
 ]
 resolver = "2"

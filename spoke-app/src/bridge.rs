@@ -5,7 +5,8 @@ use matrix_sdk::{
     Client, Room, RoomState,
     config::SyncSettings,
     ruma::{
-        RoomId, UserId,
+        OwnedRoomOrAliasId, RoomId, UserId,
+        api::client::room::create_room::v3::Request as CreateRoomRequest,
         events::room::{
             member::{MembershipState, StrippedRoomMemberEvent},
             message::{MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent},
@@ -47,6 +48,9 @@ pub enum AppCommand {
     SendMessage { room_id: String, body: String },
     InviteUser { room_id: String, mxid: String },
     JoinRoom { room_id: String },
+    CreateRoom { name: String },
+    JoinRoomByAlias { alias: String },
+    LeaveRoom { room_id: String },
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -179,27 +183,59 @@ async fn matrix_task(
                     match inner.join_room_by_id(&rid).await {
                         Ok(_) => {
                             send(&tx, &ctx_cmd, AppEvent::Joined { room_id });
-                            send(&tx, &ctx_cmd, AppEvent::RoomsUpdated(
-                                inner.joined_rooms().into_iter()
-                                    .map(|r| RoomInfo {
-                                        id: r.room_id().to_string(),
-                                        name: r.name().unwrap_or_else(|| r.room_id().to_string()),
-                                    })
-                                    .collect()
-                            ));
-                            send(&tx, &ctx_cmd, AppEvent::InvitesUpdated(
-                                inner.invited_rooms().into_iter()
-                                    .map(|r| InviteInfo {
-                                        room_id: r.room_id().to_string(),
-                                        room_name: r.name().unwrap_or_else(|| r.room_id().to_string()),
-                                        inviter: String::new(),
-                                    })
-                                    .collect()
-                            ));
+                            send(&tx, &ctx_cmd, AppEvent::RoomsUpdated(collect_rooms_from_client(&inner)));
+                            send(&tx, &ctx_cmd, AppEvent::InvitesUpdated(collect_invites_from_client(&inner)));
                         }
                         Err(e) => {
                             warn!("join: {e}");
                             send(&tx, &ctx_cmd, AppEvent::Error(e.to_string()));
+                        }
+                    }
+                }
+
+                AppCommand::CreateRoom { name } => {
+                    let mut req = CreateRoomRequest::new();
+                    req.name = Some(name);
+                    match inner.create_room(req).await {
+                        Ok(resp) => {
+                            let room_id = resp.room_id().to_string();
+                            send(&tx, &ctx_cmd, AppEvent::Joined { room_id: room_id.clone() });
+                            send(&tx, &ctx_cmd, AppEvent::RoomsUpdated(collect_rooms_from_client(&inner)));
+                        }
+                        Err(e) => {
+                            warn!("create_room: {e}");
+                            send(&tx, &ctx_cmd, AppEvent::Error(e.to_string()));
+                        }
+                    }
+                }
+
+                AppCommand::JoinRoomByAlias { alias } => {
+                    let id: OwnedRoomOrAliasId = match alias.try_into() {
+                        Ok(id) => id,
+                        Err(e) => { warn!("invalid alias: {e}"); continue; }
+                    };
+                    match inner.join_room_by_id_or_alias(&id, &[]).await {
+                        Ok(room) => {
+                            let room_id = room.room_id().to_string();
+                            send(&tx, &ctx_cmd, AppEvent::Joined { room_id });
+                            send(&tx, &ctx_cmd, AppEvent::RoomsUpdated(collect_rooms_from_client(&inner)));
+                        }
+                        Err(e) => {
+                            warn!("join: {e}");
+                            send(&tx, &ctx_cmd, AppEvent::Error(e.to_string()));
+                        }
+                    }
+                }
+
+                AppCommand::LeaveRoom { room_id } => {
+                    let Ok(rid) = RoomId::parse(&room_id) else { continue };
+                    if let Some(room) = inner.get_room(&rid) {
+                        match room.leave().await {
+                            Ok(_) => send(&tx, &ctx_cmd, AppEvent::RoomsUpdated(collect_rooms_from_client(&inner))),
+                            Err(e) => {
+                                warn!("leave: {e}");
+                                send(&tx, &ctx_cmd, AppEvent::Error(e.to_string()));
+                            }
                         }
                     }
                 }
@@ -232,7 +268,11 @@ fn send(tx: &mpsc::Sender<AppEvent>, ctx: &egui::Context, event: AppEvent) {
 }
 
 fn collect_rooms(client: &SpokeClient) -> Vec<RoomInfo> {
-    client.inner.joined_rooms().into_iter()
+    collect_rooms_from_client(&client.inner)
+}
+
+fn collect_rooms_from_client(client: &Client) -> Vec<RoomInfo> {
+    client.joined_rooms().into_iter()
         .map(|r| RoomInfo {
             id: r.room_id().to_string(),
             name: r.name().unwrap_or_else(|| r.room_id().to_string()),
