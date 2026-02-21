@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 spoke-core = { path = "../spoke-core" }
+matrix-sdk = { version = "0.8", features = ["sqlite"] }
 eframe = "0.31"
 egui = "0.31"
 tokio = { version = "1", features = ["full"] }
