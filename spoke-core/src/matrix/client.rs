@@ -41,7 +41,21 @@ impl SpokeClient {
             return Ok(());
         }
 
-        let user_id = UserId::parse(username)
+        // Accept either a full MXID (@alice:server) or a bare localpart (alice).
+        // For bare localparts, derive the server name from the homeserver URL.
+        let mxid = if username.starts_with('@') {
+            username.to_owned()
+        } else {
+            let server = self
+                .inner
+                .homeserver()
+                .host_str()
+                .unwrap_or("localhost")
+                .to_owned();
+            format!("@{username}:{server}")
+        };
+
+        let user_id = UserId::parse(&mxid)
             .map_err(|e| MatrixError::InvalidUserId(e.to_string()))?;
 
         self.inner
